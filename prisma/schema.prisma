@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum VenueType {
+  restaurant
+  beach_club
+  bar
+  hotel
+}
+
+// Where a venue's order data lives. "internal" means Venue Pay is the order
+// system of record (default at launch — no POS integration required).
+// Every other value means a real POS is the source of truth and we only
+// mirror/reconcile against it through lib/pos/. See lib/pos/types.ts.
+enum POSSource {
+  internal
+  square
+}
+
+enum TabStatus {
+  open
+  partially_paid
+  paid
+  closed
+  void
+}
+
+enum PaymentStatus {
+  pending
+  processing
+  succeeded
+  failed
+  canceled
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+model Venue {
+  id       String    @id @default(cuid())
+  name     String
+  type     VenueType
+  country  String // ISO 3166-1 alpha-2, e.g. "US"
+  currency String // ISO 4217 lowercase, e.g. "usd" (Stripe convention)
+
+  // Stripe Connect (Express)
+  stripeAccountId String? @unique
+  stripeOnboarded Boolean @default(false)
+
+  // Our take, in basis points of the tab total (e.g. 250 = 2.5%)
+  platformFeeBps Int @default(250)
+
+  // POS integration — see lib/pos/. Defaults to "internal" so a venue is
+  // launchable with zero POS integration. posConfig carries adapter-specific
+  // settings (e.g. Square location ID, API credentials reference) and is
+  // opaque to everything outside lib/pos/.
+  posSource POSSource @default(internal)
+  posConfig Json?
+
+  spots    Spot[]
+  tabs     Tab[]
+  payments Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("venues")
+}
+
+// A physical anchor customers scan into: a table, a lounger, a cabana.
+model Spot {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  label String // e.g. "Table 12", "Lounger 4", "Cabana B"
+
+  // Opaque, unguessable token used in the /pay/[spotToken] URL and the
+  // printed QR code. Never expose the internal id/label pairing without it.
+  qrToken String @unique @default(cuid())
+
+  tabs Tab[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, label])
+  @@map("spots")
+}
+
+model Tab {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  spotId  String
+  spot    Spot   @relation(fields: [spotId], references: [id], onDelete: Cascade)
+
+  status TabStatus @default(open)
+
+  // Which POS this tab's data originates from. Mirrors venue.posSource at
+  // creation time so historical tabs stay attributable even if a venue
+  // migrates POS providers later.
+  posSource  POSSource @default(internal)
+  externalId String? // ID of this tab/check in the source POS, if any
+
+  currency String // ISO 4217 lowercase, inherited from venue at creation
+
+  lineItems LineItem[]
+  payments  Payment[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  closedAt  DateTime?
+
+  @@index([venueId, status])
+  @@index([spotId, status])
+  @@map("tabs")
+}
+
+model LineItem {
+  id    String @id @default(cuid())
+  tabId String
+  tab   Tab    @relation(fields: [tabId], references: [id], onDelete: Cascade)
+
+  name      String
+  quantity  Int
+  // Minor currency units (e.g. cents), matching Stripe's convention.
+  unitPrice Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("line_items")
+}
+
+// A single payment against a tab. A tab can have multiple payments because
+// it can be split across several people paying separately.
+model Payment {
+  id      String @id @default(cuid())
+  tabId   String
+  tab     Tab    @relation(fields: [tabId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  // Minor currency units, matching Stripe's convention.
+  amount            Int // portion of the bill this payment covers, excluding tip
+  tipAmount         Int @default(0)
+  platformFeeAmount Int // our cut of (amount + tipAmount), taken via application_fee_amount
+
+  currency String
+
+  status                PaymentStatus @default(pending)
+  stripePaymentIntentId String?       @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tabId])
+  @@index([venueId, status])
+  @@map("payments")
+}

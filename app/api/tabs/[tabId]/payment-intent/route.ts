@@ -48,19 +48,25 @@ export async function POST(
   const total = amount + tipAmount;
   const platformFeeAmount = calculatePlatformFee(total, tab.venue.platformFeeBps);
 
-  const paymentIntent = await stripe.paymentIntents.create({
-    amount: total,
-    currency: tab.currency,
-    application_fee_amount: platformFeeAmount,
-    transfer_data: { destination: tab.venue.stripeAccountId },
-    automatic_payment_methods: { enabled: true },
-    metadata: {
-      tabId: tab.id,
-      venueId: tab.venueId,
-      amount: String(amount),
-      tipAmount: String(tipAmount),
-    },
-  });
+  let paymentIntent;
+  try {
+    paymentIntent = await stripe.paymentIntents.create({
+      amount: total,
+      currency: tab.currency,
+      application_fee_amount: platformFeeAmount,
+      transfer_data: { destination: tab.venue.stripeAccountId },
+      automatic_payment_methods: { enabled: true },
+      metadata: {
+        tabId: tab.id,
+        venueId: tab.venueId,
+        amount: String(amount),
+        tipAmount: String(tipAmount),
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to start payment with Stripe";
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
 
   const payment = await prisma.payment.create({
     data: {

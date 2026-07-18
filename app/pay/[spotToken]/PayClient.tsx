@@ -1,17 +1,20 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { loadStripe } from "@stripe/stripe-js";
 import { Elements } from "@stripe/react-stripe-js";
 import type { POSTab } from "@/lib/pos";
 import { formatMoney } from "@/lib/money";
+import { calculatePlatformFee } from "@/lib/fees";
 import CheckoutForm from "./CheckoutForm";
 
 const TIP_PRESETS = [0, 10, 15, 20];
 const SPLIT_MIN = 1;
 const SPLIT_MAX = 12;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 type Stage = "bill" | "checkout" | "success";
+type SplitMode = "even" | "items";
 
 export default function PayClient({
   spotToken,
@@ -20,6 +23,7 @@ export default function PayClient({
   currency,
   tabId,
   initialTab,
+  platformFeeBps,
   canAcceptPayment,
   publishableKey,
 }: {
@@ -29,15 +33,20 @@ export default function PayClient({
   currency: string;
   tabId: string | null;
   initialTab: POSTab | null;
+  platformFeeBps: number;
   canAcceptPayment: boolean;
   publishableKey: string;
 }) {
   const [tab, setTab] = useState(initialTab);
   const [refreshing, setRefreshing] = useState(false);
+  const [mode, setMode] = useState<SplitMode>("even");
   const [splitCount, setSplitCount] = useState(1);
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
   const [tipPercent, setTipPercent] = useState<number>(15);
   const [customTip, setCustomTip] = useState("");
   const [tipMode, setTipMode] = useState<"preset" | "custom">("preset");
+  const [email, setEmail] = useState("");
+  const [emailTouched, setEmailTouched] = useState(false);
   const [stage, setStage] = useState<Stage>("bill");
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [starting, setStarting] = useState(false);
@@ -46,33 +55,68 @@ export default function PayClient({
     publishableKey ? loadStripe(publishableKey) : null,
   );
 
-  const subtotal = tab?.subtotal ?? 0;
-  const perShare = tab ? Math.round(subtotal / splitCount) : 0;
+  const remaining = tab?.remainingSubtotal ?? 0;
+  const availableItems = useMemo(() => tab?.lineItems.filter((li) => !li.paid) ?? [], [tab]);
+  const settledItems = useMemo(() => tab?.lineItems.filter((li) => li.paid) ?? [], [tab]);
+
+  const shareAmount =
+    mode === "even"
+      ? Math.round(remaining / splitCount)
+      : availableItems
+          .filter((li) => selectedItemIds.has(li.id))
+          .reduce((sum, li) => sum + li.quantity * li.unitPrice, 0);
+
   const effectiveTipPercent =
     tipMode === "custom" ? Number.parseFloat(customTip) || 0 : tipPercent;
-  const tipAmount = Math.round(perShare * (effectiveTipPercent / 100));
-  const total = perShare + tipAmount;
+  const tipAmount = Math.round(shareAmount * (effectiveTipPercent / 100));
+  const feeAmount = shareAmount > 0 ? calculatePlatformFee(shareAmount, platformFeeBps) : 0;
+  const total = shareAmount + tipAmount + feeAmount;
+
+  const emailValid = EMAIL_RE.test(email);
+  const canPay =
+    tab &&
+    shareAmount > 0 &&
+    canAcceptPayment &&
+    emailValid &&
+    (mode === "even" || selectedItemIds.size > 0);
+
+  function toggleItem(id: string) {
+    setSelectedItemIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   async function refreshTab() {
     setRefreshing(true);
     try {
       const res = await fetch(`/api/spots/${spotToken}/tab`);
       const data = await res.json();
-      if (res.ok) setTab(data.tab);
+      if (res.ok) {
+        setTab(data.tab);
+        setSelectedItemIds(new Set());
+      }
     } finally {
       setRefreshing(false);
     }
   }
 
   async function startCheckout() {
-    if (!tabId || total <= 0) return;
+    if (!tabId || !canPay) return;
     setStarting(true);
     setError(null);
     try {
+      const body =
+        mode === "items"
+          ? { lineItemIds: [...selectedItemIds], tipAmount, email }
+          : { amount: shareAmount, tipAmount, email };
+
       const res = await fetch(`/api/tabs/${tabId}/payment-intent`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: perShare, tipAmount }),
+        body: JSON.stringify(body),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || !data) throw new Error(data?.error ?? "Couldn't start payment");
@@ -80,6 +124,8 @@ export default function PayClient({
       setStage("checkout");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't start payment");
+      // The item list may have changed underneath us (someone else paid) — refresh.
+      await refreshTab();
     } finally {
       setStarting(false);
     }
@@ -95,7 +141,8 @@ export default function PayClient({
         <p className="mb-1 text-neutral-400">
           {formatMoney(total, currency)} paid to {venueName}
         </p>
-        <p className="text-sm text-neutral-500">{spotLabel}</p>
+        <p className="mb-4 text-sm text-neutral-500">{spotLabel}</p>
+        <p className="text-sm text-neutral-500">Receipt sent to {email}</p>
       </div>
     );
   }
@@ -129,7 +176,7 @@ export default function PayClient({
         <h1 className="text-xl font-semibold">{spotLabel}</h1>
       </header>
 
-      <main className="flex-1 space-y-8 overflow-y-auto px-5 pb-40">
+      <main className="flex-1 space-y-8 overflow-y-auto px-5 pb-56">
         {/* Itemized bill */}
         <section>
           <div className="mb-3 flex items-center justify-between">
@@ -153,12 +200,16 @@ export default function PayClient({
           ) : (
             <ul className="divide-y divide-white/10 rounded-2xl border border-white/10">
               {tab.lineItems.map((li) => (
-                <li key={li.id} className="flex items-center justify-between px-4 py-3">
+                <li
+                  key={li.id}
+                  className={`flex items-center justify-between px-4 py-3 ${li.paid ? "opacity-40" : ""}`}
+                >
                   <span className="text-neutral-200">
                     {li.quantity > 1 && (
                       <span className="text-neutral-500">{li.quantity}× </span>
                     )}
                     {li.name}
+                    {li.paid && <span className="ml-2 text-xs text-emerald-400">Paid</span>}
                   </span>
                   <span className="tabular-nums text-neutral-300">
                     {formatMoney(li.quantity * li.unitPrice, currency)}
@@ -166,92 +217,222 @@ export default function PayClient({
                 </li>
               ))}
               <li className="flex items-center justify-between px-4 py-3 font-medium">
-                <span>Subtotal</span>
-                <span className="tabular-nums">{formatMoney(subtotal, currency)}</span>
+                <span>{remaining === tab.subtotal ? "Subtotal" : "Remaining"}</span>
+                <span className="tabular-nums">{formatMoney(remaining, currency)}</span>
               </li>
             </ul>
           )}
         </section>
 
-        {/* Split control */}
-        <section>
-          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">
-            Split
-          </h2>
-          <div className="flex items-center justify-between rounded-2xl border border-white/10 px-4 py-3">
-            <button
-              type="button"
-              onClick={() => setSplitCount((n) => Math.max(SPLIT_MIN, n - 1))}
-              className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-xl active:scale-95"
-              aria-label="Split fewer ways"
-            >
-              −
-            </button>
-            <div className="text-center">
-              <p className="text-2xl font-semibold tabular-nums">{splitCount}</p>
-              <p className="text-xs text-neutral-500">
-                {splitCount === 1 ? "way" : "ways"}
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={() => setSplitCount((n) => Math.min(SPLIT_MAX, n + 1))}
-              className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-xl active:scale-95"
-              aria-label="Split more ways"
-            >
-              +
-            </button>
-          </div>
-        </section>
+        {tab && tab.lineItems.length > 0 && (
+          <>
+            {/* Split mode toggle */}
+            <section>
+              <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">
+                How do you want to pay?
+              </h2>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMode("even")}
+                  className={`rounded-xl py-3 text-center text-sm font-medium transition ${
+                    mode === "even"
+                      ? "bg-white text-neutral-950"
+                      : "bg-white/10 text-white hover:bg-white/15"
+                  }`}
+                >
+                  Split bill
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("items")}
+                  disabled={availableItems.length === 0}
+                  className={`rounded-xl py-3 text-center text-sm font-medium transition disabled:opacity-40 ${
+                    mode === "items"
+                      ? "bg-white text-neutral-950"
+                      : "bg-white/10 text-white hover:bg-white/15"
+                  }`}
+                >
+                  Choose items
+                </button>
+              </div>
+            </section>
 
-        {/* Tip control */}
-        <section>
-          <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">
-            Tip
-          </h2>
-          <div className="grid grid-cols-4 gap-2">
-            {TIP_PRESETS.map((pct) => (
+            {mode === "even" ? (
+              <section>
+                <div className="flex items-center justify-between rounded-2xl border border-white/10 px-4 py-3">
+                  <button
+                    type="button"
+                    onClick={() => setSplitCount((n) => Math.max(SPLIT_MIN, n - 1))}
+                    className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-xl active:scale-95"
+                    aria-label="Split fewer ways"
+                  >
+                    −
+                  </button>
+                  <div className="text-center">
+                    <p className="text-2xl font-semibold tabular-nums">{splitCount}</p>
+                    <p className="text-xs text-neutral-500">
+                      {splitCount === 1 ? "way" : "ways"}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSplitCount((n) => Math.min(SPLIT_MAX, n + 1))}
+                    className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-xl active:scale-95"
+                    aria-label="Split more ways"
+                  >
+                    +
+                  </button>
+                </div>
+              </section>
+            ) : (
+              <section>
+                <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">
+                  Pick what you had
+                </h2>
+                {availableItems.length === 0 ? (
+                  <p className="rounded-2xl border border-white/10 p-5 text-neutral-400">
+                    Everything on this tab has already been paid for.
+                  </p>
+                ) : (
+                  <ul className="space-y-2">
+                    {availableItems.map((li) => (
+                      <li key={li.id}>
+                        <button
+                          type="button"
+                          onClick={() => toggleItem(li.id)}
+                          className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition ${
+                            selectedItemIds.has(li.id)
+                              ? "border-white bg-white/10"
+                              : "border-white/10 bg-transparent hover:bg-white/5"
+                          }`}
+                        >
+                          <span className="flex items-center gap-3">
+                            <span
+                              className={`flex h-5 w-5 items-center justify-center rounded-full border ${
+                                selectedItemIds.has(li.id)
+                                  ? "border-white bg-white"
+                                  : "border-white/30"
+                              }`}
+                            >
+                              {selectedItemIds.has(li.id) && (
+                                <span className="h-2.5 w-2.5 rounded-full bg-neutral-950" />
+                              )}
+                            </span>
+                            <span>
+                              {li.quantity > 1 && (
+                                <span className="text-neutral-500">{li.quantity}× </span>
+                              )}
+                              {li.name}
+                            </span>
+                          </span>
+                          <span className="tabular-nums text-neutral-300">
+                            {formatMoney(li.quantity * li.unitPrice, currency)}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {settledItems.length > 0 && (
+                  <p className="mt-3 text-xs text-neutral-500">
+                    {settledItems.length} item{settledItems.length > 1 ? "s" : ""} already paid
+                    for by someone else.
+                  </p>
+                )}
+              </section>
+            )}
+
+            {/* Tip control */}
+            <section>
+              <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">
+                Tip
+              </h2>
+              <div className="grid grid-cols-4 gap-2">
+                {TIP_PRESETS.map((pct) => (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() => {
+                      setTipMode("preset");
+                      setTipPercent(pct);
+                    }}
+                    className={`rounded-xl py-3 text-center text-sm font-medium transition ${
+                      tipMode === "preset" && tipPercent === pct
+                        ? "bg-white text-neutral-950"
+                        : "bg-white/10 text-white hover:bg-white/15"
+                    }`}
+                  >
+                    {pct}%
+                  </button>
+                ))}
+              </div>
               <button
-                key={pct}
                 type="button"
-                onClick={() => {
-                  setTipMode("preset");
-                  setTipPercent(pct);
-                }}
-                className={`rounded-xl py-3 text-center text-sm font-medium transition ${
-                  tipMode === "preset" && tipPercent === pct
+                onClick={() => setTipMode("custom")}
+                className={`mt-2 w-full rounded-xl py-3 text-center text-sm font-medium transition ${
+                  tipMode === "custom"
                     ? "bg-white text-neutral-950"
                     : "bg-white/10 text-white hover:bg-white/15"
                 }`}
               >
-                {pct}%
+                Custom
               </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            onClick={() => setTipMode("custom")}
-            className={`mt-2 w-full rounded-xl py-3 text-center text-sm font-medium transition ${
-              tipMode === "custom"
-                ? "bg-white text-neutral-950"
-                : "bg-white/10 text-white hover:bg-white/15"
-            }`}
-          >
-            Custom
-          </button>
-          {tipMode === "custom" && (
-            <input
-              type="number"
-              min={0}
-              max={100}
-              inputMode="numeric"
-              placeholder="Tip %"
-              value={customTip}
-              onChange={(e) => setCustomTip(e.target.value)}
-              className="mt-2 w-full rounded-xl border border-white/10 bg-transparent px-4 py-3 text-white placeholder:text-neutral-600"
-            />
-          )}
-        </section>
+              {tipMode === "custom" && (
+                <input
+                  type="number"
+                  min={0}
+                  max={100}
+                  inputMode="numeric"
+                  placeholder="Tip %"
+                  value={customTip}
+                  onChange={(e) => setCustomTip(e.target.value)}
+                  className="mt-2 w-full rounded-xl border border-white/10 bg-transparent px-4 py-3 text-white placeholder:text-neutral-600"
+                />
+              )}
+            </section>
+
+            {/* Email for receipt */}
+            <section>
+              <h2 className="mb-3 text-sm font-medium uppercase tracking-wide text-neutral-500">
+                Receipt
+              </h2>
+              <input
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                placeholder="you@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onBlur={() => setEmailTouched(true)}
+                className="w-full rounded-xl border border-white/10 bg-transparent px-4 py-3 text-white placeholder:text-neutral-600"
+              />
+              {emailTouched && !emailValid && (
+                <p className="mt-2 text-sm text-red-400">Enter a valid email for your receipt.</p>
+              )}
+            </section>
+
+            {/* Fee breakdown */}
+            {shareAmount > 0 && (
+              <section className="space-y-1 text-sm text-neutral-400">
+                <div className="flex justify-between">
+                  <span>Your items</span>
+                  <span className="tabular-nums">{formatMoney(shareAmount, currency)}</span>
+                </div>
+                {tipAmount > 0 && (
+                  <div className="flex justify-between">
+                    <span>Tip</span>
+                    <span className="tabular-nums">{formatMoney(tipAmount, currency)}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span>Service fee</span>
+                  <span className="tabular-nums">{formatMoney(feeAmount, currency)}</span>
+                </div>
+              </section>
+            )}
+          </>
+        )}
 
         {error && <p className="rounded-xl bg-red-500/10 p-3 text-sm text-red-400">{error}</p>}
 
@@ -265,9 +446,7 @@ export default function PayClient({
       {/* Sticky pay bar */}
       <div className="fixed inset-x-0 bottom-0 border-t border-white/10 bg-neutral-950/90 px-5 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-4 backdrop-blur">
         <div className="mb-3 flex items-baseline justify-between text-sm text-neutral-400">
-          <span>
-            Your share {tipAmount > 0 && `+ ${formatMoney(tipAmount, currency)} tip`}
-          </span>
+          <span>Total, fee included</span>
           <span className="text-xl font-semibold text-white tabular-nums">
             {formatMoney(total, currency)}
           </span>
@@ -275,7 +454,7 @@ export default function PayClient({
         <button
           type="button"
           onClick={startCheckout}
-          disabled={!tab || total <= 0 || !canAcceptPayment || starting}
+          disabled={!canPay || starting}
           className="w-full rounded-2xl bg-white py-4 text-center text-lg font-semibold text-neutral-950 transition active:scale-[0.99] disabled:opacity-50"
         >
           {starting ? "Starting…" : `Pay ${formatMoney(total, currency)}`}

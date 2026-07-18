@@ -32,6 +32,7 @@ export default async function PayPage({
       currency={spot.venue.currency}
       tabId={tab?.id ?? null}
       initialTab={tab}
+      platformFeeBps={spot.venue.platformFeeBps}
       canAcceptPayment={Boolean(spot.venue.stripeAccountId && spot.venue.stripeOnboarded)}
       publishableKey={process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY ?? ""}
     />

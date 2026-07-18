@@ -6,7 +6,7 @@ import type {
   POSTab,
   POSTabStatus,
 } from "./types";
-import type { Tab, LineItem, TabStatus } from "@prisma/client";
+import type { Tab, LineItem, Payment, TabStatus } from "@prisma/client";
 
 // InternalAdapter is the default: it reads and writes Venue Pay's own
 // database directly. Every venue runs on this unless posSource is
@@ -21,13 +21,20 @@ const STATUS_MAP: Record<TabStatus, POSTabStatus> = {
   void: "void",
 };
 
-type TabWithItems = Tab & { lineItems: LineItem[]; spot: { label: string } };
+type TabWithItems = Tab & {
+  lineItems: LineItem[];
+  payments: Payment[];
+  spot: { label: string };
+};
 
 function toPOSTab(tab: TabWithItems): POSTab {
   const subtotal = tab.lineItems.reduce(
     (sum, li) => sum + li.quantity * li.unitPrice,
     0,
   );
+  const paidTowardBill = tab.payments
+    .filter((p) => p.status === "succeeded")
+    .reduce((sum, p) => sum + p.amount, 0);
   return {
     id: tab.id,
     externalId: tab.externalId,
@@ -39,11 +46,19 @@ function toPOSTab(tab: TabWithItems): POSTab {
       name: li.name,
       quantity: li.quantity,
       unitPrice: li.unitPrice,
+      paid: li.paymentId !== null,
     })),
     subtotal,
+    remainingSubtotal: Math.max(0, subtotal - paidTowardBill),
     createdAt: tab.createdAt,
   };
 }
+
+const TAB_INCLUDE = {
+  lineItems: true,
+  payments: true,
+  spot: { select: { label: true } },
+} as const;
 
 export class InternalAdapter implements POSAdapter {
   async listOpenTabs(venueId: string): Promise<POSTab[]> {
@@ -52,7 +67,7 @@ export class InternalAdapter implements POSAdapter {
         venueId,
         status: { in: ["open", "partially_paid"] },
       },
-      include: { lineItems: true, spot: { select: { label: true } } },
+      include: TAB_INCLUDE,
       orderBy: { createdAt: "asc" },
     });
     return tabs.map(toPOSTab);
@@ -65,7 +80,7 @@ export class InternalAdapter implements POSAdapter {
         status: { in: ["open", "partially_paid"] },
         spot: { label: spotLabel },
       },
-      include: { lineItems: true, spot: { select: { label: true } } },
+      include: TAB_INCLUDE,
       orderBy: { createdAt: "desc" },
     });
     return tab ? toPOSTab(tab) : null;
@@ -120,7 +135,7 @@ export class InternalAdapter implements POSAdapter {
 
     const updated = await prisma.tab.findUniqueOrThrow({
       where: { id: tab.id },
-      include: { lineItems: true, spot: { select: { label: true } } },
+      include: TAB_INCLUDE,
     });
     return toPOSTab(updated);
   }
@@ -128,12 +143,24 @@ export class InternalAdapter implements POSAdapter {
   async markPaid(venueId: string, input: MarkPaidInput): Promise<void> {
     const tab = await prisma.tab.findFirst({
       where: { id: input.externalId, venueId },
-      include: { lineItems: true, payments: true },
+      include: TAB_INCLUDE,
     });
     if (!tab) {
       throw new Error(
         `No tab ${input.externalId} found for venue ${venueId}`,
       );
+    }
+
+    // "Choose items" mode: lock the specific line items to this payment so
+    // they drop out of what's offered to the next scanner. Even-split
+    // payments don't pass lineItemIds, since they don't map to specific
+    // items — reducing remainingSubtotal for those comes from the
+    // payments-sum math in toPOSTab instead.
+    if (input.lineItemIds && input.lineItemIds.length > 0) {
+      await prisma.lineItem.updateMany({
+        where: { id: { in: input.lineItemIds }, tabId: tab.id, paymentId: null },
+        data: { paymentId: input.paymentId },
+      });
     }
 
     const subtotal = tab.lineItems.reduce(

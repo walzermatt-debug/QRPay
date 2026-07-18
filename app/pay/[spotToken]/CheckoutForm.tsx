@@ -58,7 +58,16 @@ export default function CheckoutForm({
         >
           ← Back
         </button>
-        <PaymentElement options={{ layout: "tabs" }} />
+        {/*
+          Wallets (Apple Pay / Google Pay) render as buttons above the tabs
+          automatically when the device/browser supports them and the
+          domain is verified for Apple Pay in the Stripe Dashboard — see
+          README. "card" stays available as a tab either way, covering
+          manual entry.
+        */}
+        <PaymentElement
+          options={{ layout: "tabs", wallets: { applePay: "auto", googlePay: "auto" } }}
+        />
         {error && (
           <p className="mt-4 rounded-lg bg-red-500/10 p-3 text-sm text-red-400">{error}</p>
         )}

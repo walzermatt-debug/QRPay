@@ -138,6 +138,13 @@ model LineItem {
   // Minor currency units (e.g. cents), matching Stripe's convention.
   unitPrice Int
 
+  // Set when a customer pays for this specific item via the "choose items"
+  // split mode. Locks the item so it drops out of what's offered to the
+  // next scanner. Left null for items covered by an even split, since
+  // those don't correspond to specific items.
+  paymentId String?
+  payment   Payment? @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -154,14 +161,25 @@ model Payment {
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
 
   // Minor currency units, matching Stripe's convention.
-  amount            Int // portion of the bill this payment covers, excluding tip
+  amount            Int // portion of the bill this payment covers, excluding tip and fee
   tipAmount         Int @default(0)
-  platformFeeAmount Int // our cut of (amount + tipAmount), taken via application_fee_amount
+  // Our cut, charged on top of (amount) rather than deducted from it — the
+  // payer's card is charged (amount + tipAmount + platformFeeAmount), and
+  // the venue still receives the full (amount + tipAmount) via
+  // transfer_data.destination.
+  platformFeeAmount Int
 
   currency String
 
+  // Where the Stripe receipt gets sent. Required at checkout regardless of
+  // payment method (card or wallet), since receipt_email must be set on the
+  // PaymentIntent for Stripe's automatic receipt to fire.
+  payerEmail String?
+
   status                PaymentStatus @default(pending)
   stripePaymentIntentId String?       @unique
+
+  lineItems LineItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

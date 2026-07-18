@@ -69,20 +69,36 @@ export async function POST(request: Request) {
         data: { status: "succeeded" },
       });
 
+      const lineItemIds = intent.metadata.lineItemIds
+        ? intent.metadata.lineItemIds.split(",").filter(Boolean)
+        : undefined;
+
       const adapter = await getPOSAdapter(payment.venueId);
       await adapter.markPaid(payment.venueId, {
         externalId: payment.tabId,
         amountPaid: payment.amount,
         tipAmount: payment.tipAmount,
+        paymentId: payment.id,
+        lineItemIds,
       });
       break;
     }
 
     case "payment_intent.payment_failed": {
       const intent = event.data.object as Stripe.PaymentIntent;
-      await prisma.payment.updateMany({
-        where: { stripePaymentIntentId: intent.id, status: { not: "succeeded" } },
+      const payment = await prisma.payment.findUnique({
+        where: { stripePaymentIntentId: intent.id },
+      });
+      if (!payment || payment.status === "succeeded") break;
+
+      await prisma.payment.update({
+        where: { id: payment.id },
         data: { status: "failed" },
+      });
+      // Release any items this payment had claimed in "choose items" mode.
+      await prisma.lineItem.updateMany({
+        where: { paymentId: payment.id },
+        data: { paymentId: null },
       });
       break;
     }

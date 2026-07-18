@@ -25,6 +25,12 @@ export interface POSLineItem {
   quantity: number;
   /** Minor currency units (e.g. cents), matching Stripe's convention. */
   unitPrice: number;
+  /**
+   * True once a "choose items" payment has claimed this line (whole line,
+   * not sub-divisible by quantity). Locked items are excluded from what's
+   * offered to the next scanner.
+   */
+  paid: boolean;
 }
 
 export interface POSTab {
@@ -39,6 +45,13 @@ export interface POSTab {
   lineItems: POSLineItem[];
   /** Sum of quantity * unitPrice across lineItems, in minor units. */
   subtotal: number;
+  /**
+   * subtotal minus the amount covered by all succeeded payments so far
+   * (regardless of split mode). What "split evenly" divides — it shrinks
+   * as people pay, so whoever scans next just enters how many people are
+   * left and splits what's actually still owed.
+   */
+  remainingSubtotal: number;
   createdAt: Date;
 }
 
@@ -52,10 +65,18 @@ export interface NewLineItemInput {
 export interface MarkPaidInput {
   /** The POS's identifier for the tab being reconciled. */
   externalId: string;
-  /** Amount of the bill (excluding tip) this payment covered, in minor units. */
+  /** Amount of the bill (excluding tip and platform fee) this payment covered, in minor units. */
   amountPaid: number;
   /** Tip amount for this payment, in minor units. */
   tipAmount: number;
+  /** Venue Pay's own Payment id, so specific line items can be linked to it. */
+  paymentId: string;
+  /**
+   * Set only when the payer used "choose items" mode — the specific line
+   * items this payment covers, which should be locked to it. Omitted for
+   * an even-split payment, since that doesn't correspond to specific items.
+   */
+  lineItemIds?: string[];
 }
 
 /**

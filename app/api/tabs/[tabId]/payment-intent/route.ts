@@ -149,7 +149,9 @@ export async function POST(
       application_fee_amount: payment.platformFeeAmount,
       transfer_data: { destination: tab.venue.stripeAccountId },
       automatic_payment_methods: { enabled: true },
-      receipt_email: email,
+      // No receipt_email here — we send our own branded receipt (see
+      // lib/email/sendReceipt.ts) from the webhook instead of relying on
+      // Stripe's default, unbranded one.
       metadata: {
         tabId: tab.id,
         venueId: tab.venueId,

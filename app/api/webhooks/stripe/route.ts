@@ -3,13 +3,15 @@ import Stripe from "stripe";
 import { prisma } from "@/lib/prisma";
 import { stripe } from "@/lib/stripe";
 import { getPOSAdapter } from "@/lib/pos";
+import { sendReceiptEmail } from "@/lib/email/sendReceipt";
 
 // Single Stripe webhook endpoint for the platform account. Handles:
 //   - account.updated: keeps Venue.stripeOnboarded in sync as connected
 //     accounts complete (or lose) Express onboarding requirements.
-//   - payment_intent.succeeded: marks our Payment row succeeded and calls
-//     the venue's POS adapter markPaid() to reconcile the tab. This is the
-//     one place reconciliation happens, and it's adapter-agnostic — an
+//   - payment_intent.succeeded: marks our Payment row succeeded, calls the
+//     venue's POS adapter markPaid() to reconcile the tab, and sends our
+//     own branded receipt (not Stripe's default one — see
+//     lib/email/sendReceipt.ts). Reconciliation is adapter-agnostic — an
 //     InternalAdapter-backed venue gets its tab status flipped directly,
 //     a real-POS-backed venue would get the tender recorded back into that
 //     POS, and this handler doesn't need to know which.
@@ -81,6 +83,10 @@ export async function POST(request: Request) {
         paymentId: payment.id,
         lineItemIds,
       });
+
+      // Never blocks/fails the webhook response — see sendReceiptEmail's
+      // own error handling.
+      await sendReceiptEmail(payment.id);
       break;
     }
 

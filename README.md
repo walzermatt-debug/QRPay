@@ -86,9 +86,32 @@ entry will appear.
 
 A receipt email is required before paying (one field, used regardless of
 payment method — Apple/Google Pay don't reliably expose an email to us
-before confirmation, so this is the simple, uniform way to guarantee
-Stripe's automatic receipt has somewhere to go). It's set as
-`receipt_email` on the PaymentIntent and stored on `Payment.payerEmail`.
+before confirmation, so this is the simple, uniform way to guarantee a
+receipt has somewhere to go). It's stored on `Payment.payerEmail`.
+
+### Branded receipts (`lib/email/`)
+
+We send our **own** receipt — not Stripe's default one, which is unbranded
+and comes from Stripe rather than the venue. `payment_intent.succeeded`
+calls `sendReceiptEmail(paymentId)`, which:
+
+1. Renders an itemized PDF (`ReceiptDocument.tsx`, via `@react-pdf/renderer`)
+   — venue name/address, the items this payment covered (or "Your share of
+   the bill" for an even-split payment that doesn't map to specific items),
+   tip, fee, and total.
+2. Emails it via Resend (`resend.ts`) with a short branded HTML body and
+   the PDF attached, from `RECEIPT_FROM_EMAIL`.
+3. Records `Payment.receiptSentAt` on success or `Payment.receiptError` on
+   failure — visible as a "Receipt sent" / "Receipt not sent" tag per
+   payment on the operator dashboard.
+
+`sendReceiptEmail` never throws — a receipt failure is recorded but never
+blocks or fails the webhook, since payment reconciliation has already
+happened by the time it runs. **`RECEIPT_FROM_EMAIL` must be on a domain
+verified in the Resend dashboard** to deliver to arbitrary addresses;
+without one it falls back to Resend's own test sender, which only
+delivers to the Resend account's own email — fine for local dev, not for
+production.
 
 ### App surfaces
 

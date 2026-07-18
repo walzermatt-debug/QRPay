@@ -152,6 +152,18 @@ export default async function VenueDashboardPage({
                 <span className="font-medium">
                   {formatMoney(payment.amount + payment.tipAmount, payment.currency)}
                 </span>
+                {payment.status === "succeeded" && (
+                  <span
+                    className={
+                      payment.receiptSentAt
+                        ? "text-xs text-neutral-400"
+                        : "text-xs text-amber-600"
+                    }
+                    title={payment.receiptError ?? undefined}
+                  >
+                    {payment.receiptSentAt ? "Receipt sent" : "Receipt not sent"}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

@@ -54,6 +54,10 @@ model Venue {
   country  String // ISO 3166-1 alpha-2, e.g. "US"
   currency String // ISO 4217 lowercase, e.g. "usd" (Stripe convention)
 
+  // Free-text street address, shown on the branded receipt PDF if present.
+  // Purely cosmetic — nothing else in the app depends on it.
+  address String?
+
   // Stripe Connect (Express)
   stripeAccountId String? @unique
   stripeOnboarded Boolean @default(false)
@@ -171,10 +175,18 @@ model Payment {
 
   currency String
 
-  // Where the Stripe receipt gets sent. Required at checkout regardless of
-  // payment method (card or wallet), since receipt_email must be set on the
-  // PaymentIntent for Stripe's automatic receipt to fire.
+  // Where our own branded receipt gets emailed (see lib/email/). Required
+  // at checkout regardless of payment method (card or wallet) — Apple/
+  // Google Pay don't reliably surface an email to us before confirmation,
+  // so this one field covers every payment method uniformly.
   payerEmail String?
+
+  // Set once the branded receipt email has been sent (or attempted).
+  // Distinct from Payment.status: a payment can succeed with the receipt
+  // still failing to send, and we don't want to retry-spam on webhook
+  // redelivery once we've already tried.
+  receiptSentAt DateTime?
+  receiptError  String?
 
   status                PaymentStatus @default(pending)
   stripePaymentIntentId String?       @unique

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getPOSAdapter } from "@/lib/pos";
 import { generateQrDataUrl, payUrlForSpot } from "@/lib/qr";
+import { getBaseUrl } from "@/lib/url";
 import { formatMoney } from "@/lib/money";
 import StripeConnectSection from "./StripeConnectSection";
 import AddSpotForm from "./AddSpotForm";
@@ -29,12 +30,16 @@ export default async function VenueDashboardPage({
     where: { venueId },
     orderBy: { label: "asc" },
   });
+  const baseUrl = await getBaseUrl();
   const spotsWithQr = await Promise.all(
-    spots.map(async (spot) => ({
-      ...spot,
-      payUrl: payUrlForSpot(spot.qrToken),
-      qrDataUrl: await generateQrDataUrl(payUrlForSpot(spot.qrToken)),
-    })),
+    spots.map(async (spot) => {
+      const payUrl = payUrlForSpot(spot.qrToken, baseUrl);
+      return {
+        ...spot,
+        payUrl,
+        qrDataUrl: await generateQrDataUrl(payUrl),
+      };
+    }),
   );
 
   const adapter = await getPOSAdapter(venueId);

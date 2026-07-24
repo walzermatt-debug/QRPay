@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { generateQrDataUrl, payUrlForSpot } from "@/lib/qr";
+import { getBaseUrl } from "@/lib/url";
 import PrintButton from "./PrintButton";
 
 export default async function SpotPrintPage({
@@ -16,7 +17,8 @@ export default async function SpotPrintPage({
   });
   if (!spot) notFound();
 
-  const payUrl = payUrlForSpot(spot.qrToken);
+  const baseUrl = await getBaseUrl();
+  const payUrl = payUrlForSpot(spot.qrToken, baseUrl);
   const qrDataUrl = await generateQrDataUrl(payUrl);
 
   return (

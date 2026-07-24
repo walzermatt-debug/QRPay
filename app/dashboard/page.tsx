@@ -2,6 +2,12 @@ import Link from "next/link";
 import { prisma } from "@/lib/prisma";
 import NewVenueForm from "./NewVenueForm";
 
+// Always render at request time. Without this, Next.js treats this page as
+// static-eligible (no dynamic APIs used) and prerenders it at build time —
+// baking in a snapshot of whatever venues exist then, and requiring a live
+// DB connection during the build itself.
+export const dynamic = "force-dynamic";
+
 export default async function DashboardPage() {
   const venues = await prisma.venue.findMany({
     orderBy: { createdAt: "desc" },
